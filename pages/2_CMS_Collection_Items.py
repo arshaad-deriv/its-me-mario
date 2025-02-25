@@ -18,6 +18,65 @@ st.set_page_config(
     layout="wide"
 )
 
+# Add at the top of the file with other imports
+COLLECTION_CONFIGS = {
+    "Blog": {
+        "fields_to_translate": [
+            'disclaimer-2',
+            'post',
+            'summary',
+            'name',
+            'meta-description-2',
+            'page-title'
+        ],
+        "fields_to_preserve": ['slug', 'accumulators-option'],
+        "display_name": "Blog Post",
+        "item_identifier": "name"
+    },
+    "Support Questions": {
+        "fields_to_translate": [
+            'answer',
+            'name'
+        ],
+        "fields_to_preserve": ['slug', 'category-3', 'order-number'],
+        "display_name": "Help Center Question",
+        "item_identifier": "question"
+    }
+}
+
+def get_collection_config(collection_name):
+    """Get collection configuration based on collection name"""
+    for collection_type, config in COLLECTION_CONFIGS.items():
+        if collection_type.lower() in collection_name.lower():
+            return collection_type, config
+    return None, None
+
+def parse_collection_items(items, collection_type, config):
+    """Parse collection items based on collection type"""
+    parsed_items = []
+    
+    for item in items:
+        field_data = item.get('fieldData', {})
+        
+        # Get identifier for display
+        identifier = field_data.get(config['item_identifier'], 'Unnamed')
+        
+        # Create filtered data dictionary
+        filtered_data = {
+            key: field_data.get(key, '')
+            for key in config['fields_to_translate'] + config['fields_to_preserve']
+            if key in field_data
+        }
+        
+        parsed_items.append({
+            'id': item.get('id'),
+            'identifier': identifier,
+            'slug': field_data.get('slug', 'no-slug'),
+            'data': filtered_data
+        })
+    
+    return parsed_items
+
 def get_cms_locales(site_id, api_key):
     """Get list of CMS locales from site data"""
     url = f"https://api.webflow.com/v2/sites/{site_id}"
@@ -260,10 +319,18 @@ def main():
             )
             
             if selected_collection:
-                # Extract collection ID from the selection
-                collection_id = selected_collection.split('(')[-1].strip(')')
+                # Get collection type and config
+                collection_name = selected_collection.split('(')[0].strip()
+                collection_type, config = get_collection_config(collection_name)
                 
-                # Get collection items
+                if not config:
+                    st.warning(f"Collection type '{collection_name}' is not configured for translation. Available types: {', '.join(COLLECTION_CONFIGS.keys())}")
+                    return
+                
+                st.write(f"Processing {config['display_name']} collection")
+                
+                # Extract collection ID and fetch items
+                collection_id = selected_collection.split('(')[-1].strip(')')
                 with st.spinner("Fetching collection items..."):
                     items = get_collection_items(
                         st.session_state.site_id,
@@ -272,53 +339,24 @@ def main():
                     )
                     
                     if items and 'items' in items:
-                        # Create a filter for slugs with more meaningful names
-                        all_items = [(
-                            item.get('fieldData', {}).get('name', 'Unnamed'),
-                            item.get('fieldData', {}).get('slug', 'no-slug'),
-                            item.get('id')
-                        ) for item in items['items']]
+                        # Parse items based on collection type
+                        parsed_items = parse_collection_items(items['items'], collection_type, config)
                         
-                        selected_item_name = st.selectbox(
-                            "Filter by Content",
-                            options=['All'] + [f"{name} ({slug})" for name, slug, _ in all_items]
+                        selected_item = st.selectbox(
+                            f"Select {config['display_name']} (Total: {len(parsed_items)})",
+                            options=['All'] + [f"{item['identifier']} ({item['slug']})" for item in parsed_items]
                         )
                         
-                        # Initialize selected_data
-                        selected_data = None
-                        
-                        # Filter items based on selection
-                        if selected_item_name != 'All':
-                            selected_slug = selected_item_name.split('(')[-1].strip(')')
+                        if selected_item != 'All':
+                            selected_slug = selected_item.split('(')[-1].strip(')')
                             selected_data = next(
-                                (item for item in items['items'] 
-                                if item.get('fieldData', {}).get('slug') == selected_slug),
+                                (item for item in parsed_items if item['slug'] == selected_slug),
                                 None
                             )
-                        
+                            
                             if selected_data:
-                                # Extract relevant fields from the original item
-                                original_field_data = selected_data.get('fieldData', {})
-                                relevant_keys = [
-                                    'disclaimer-2',
-                                    'post',
-                                    'summary',
-                                    'name',
-                                    'meta-description-2',
-                                    'page-title',
-                                    'accumulators-option',
-                                    'slug'
-                                ]
-                                
-                                # Create a filtered dictionary with only relevant keys
-                                filtered_data = {
-                                    key: original_field_data.get(key, '')
-                                    for key in relevant_keys
-                                    if key in original_field_data
-                                }
-                                
                                 st.subheader("Original Content")
-                                st.json(filtered_data)
+                                st.json(selected_data['data'])
                                 
                                 # Translation section
                                 st.subheader("Translation Management")
@@ -331,7 +369,7 @@ def main():
                                 )
                                 
                                 if translation_mode == "Single Language":
-                                    # Existing single language translation logic
+                                    # Single language translation logic
                                     target_language = st.selectbox(
                                         "Select target language",
                                         options=[f"{locale['name']} ({locale['code']}) - {locale['id']}" 
@@ -347,25 +385,22 @@ def main():
                                         with st.form("translation_form"):
                                             edited_fields = {}
                                             
-                                            for key, value in filtered_data.items():
-                                                if key in ['slug', 'accumulators-option']:
+                                            for key, value in selected_data['data'].items():
+                                                if key in config['fields_to_preserve']:
                                                     edited_fields[key] = value
                                                     continue
                                                 
                                                 if isinstance(value, str):
-                                                    # Use translated text if available, otherwise use original
-                                                    display_text = st.session_state.get('translations', {}).get(key, value)
-                                                    
                                                     if len(value) > 200:
                                                         edited_fields[key] = st.text_area(
                                                             key,
-                                                            value=display_text,
+                                                            value=value,
                                                             height=300
                                                         )
                                                     else:
                                                         edited_fields[key] = st.text_input(
                                                             key,
-                                                            value=display_text
+                                                            value=value
                                                         )
                                             
                                             col1, col2 = st.columns(2)
@@ -376,8 +411,8 @@ def main():
                                             
                                             if translate_button:
                                                 with st.spinner("Translating content..."):
-                                                    for key, value in filtered_data.items():
-                                                        if isinstance(value, str) and key not in ['slug', 'accumulators-option']:
+                                                    for key, value in selected_data['data'].items():
+                                                        if isinstance(value, str) and key not in config['fields_to_preserve']:
                                                             translated_text, error = translate_with_openai(
                                                                 value,
                                                                 language_code,
@@ -429,8 +464,8 @@ def main():
                                             current_translations = {}
                                             
                                             # Translate each field
-                                            for key, value in filtered_data.items():
-                                                if isinstance(value, str) and key not in ['slug', 'accumulators-option']:
+                                            for key, value in selected_data['data'].items():
+                                                if isinstance(value, str) and key not in config['fields_to_preserve']:
                                                     translated_text, error = translate_with_openai(
                                                         value,
                                                         locale['code'],
