@@ -9,7 +9,7 @@ import zipfile
 
 # Hide the default menu
 st.set_page_config(
-    page_title="Webflow Page Content Manager", 
+    page_title="Where's Spidey?", 
     layout="wide"
 )
 
@@ -112,41 +112,50 @@ def get_site_locales(site_id, api_key):
         return []
 
 def get_page_content(page_id, api_key):
-    """Get page content using DOM endpoint"""
-    url = f"https://api.webflow.com/v2/pages/{page_id}/dom"
+    """Get page content using DOM endpoint with pagination handling"""
+    base_url = f"https://api.webflow.com/v2/pages/{page_id}/dom"
     headers = {
         "accept": "application/json",
         "authorization": f"Bearer {api_key}",
         "accept-version": "1.0.0"
     }
     
-    print("\n" + "="*50)
-    print("API REQUEST - Get Page Content")
-    print("="*50)
-    print(f"URL: {url}")
-    print("\nHeaders:")
-    for key, value in headers.items():
-        if key.lower() == 'authorization':
-            print(f"{key}: Bearer ****{value[-4:]}")
-        else:
-            print(f"{key}: {value}")
+    all_nodes = []
+    offset = 0
+    limit = 100  # Maximum allowed by API
     
-    try:
+    while True:
+        # Construct URL with pagination parameters
+        url = f"{base_url}?limit={limit}&offset={offset}"
+        
+        print(f"\nFetching nodes {offset} to {offset + limit}...")
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         data = response.json()
         
-        # Print the complete API response
-        print("\n" + "="*50)
-        print("COMPLETE API RESPONSE")
-        print("="*50)
-        print(json.dumps(data, indent=2))
+        # Add nodes from this batch to our collection
+        current_nodes = data.get('nodes', [])
+        all_nodes.extend(current_nodes)
         
-        return data
-    except Exception as e:
-        print(f"\nERROR: {str(e)}")
-        st.error(f"Error fetching page content: {str(e)}")
-        return None
+        # Get pagination info
+        pagination = data.get('pagination', {})
+        total = pagination.get('total', 0)
+        
+        print(f"Retrieved {len(current_nodes)} nodes (Total: {len(all_nodes)}/{total})")
+        
+        # Check if we've got all nodes
+        if len(all_nodes) >= total:
+            break
+            
+        # Update offset for next batch
+        offset += limit
+    
+    # Return complete data with all nodes
+    return {
+        "pageId": data.get("pageId"),
+        "nodes": all_nodes,
+        "lastUpdated": data.get("lastUpdated")
+    }
 
 def validate_api_token(api_key):
     """Validate API token by making a test request"""
@@ -173,27 +182,32 @@ def validate_api_token(api_key):
         return False
 
 def parse_page_content(content):
-    """Parse page content and extract nodes with property overrides"""
+    """Parse page content and extract nodes with property overrides and text nodes"""
     parsed_nodes = []
     
     for node in content.get('nodes', []):
-        # Only process nodes that have propertyOverrides
+        node_data = {
+            "nodeId": node['id'],
+            "propertyOverrides": []
+        }
+        
+        # Handle text type nodes
+        if node.get('type') == 'text' and 'text' in node:
+            node_data["text"] = node['text'].get('html', '')
+            parsed_nodes.append(node_data)
+            continue
+        
+        # Handle nodes with property overrides
         if node.get('propertyOverrides'):
-            node_data = {
-                "nodeId": node['id'],
-                "propertyOverrides": []
-            }
-            
-            # Extract property overrides that have text content
             for override in node['propertyOverrides']:
                 if 'propertyId' in override and 'text' in override:
                     property_data = {
                         "propertyId": override['propertyId'],
-                        "text": override['text'].get('text', '')  # Get the text value
+                        "text": override['text'].get('text', '')
                     }
                     node_data["propertyOverrides"].append(property_data)
             
-            if node_data["propertyOverrides"]:  # Only add if there are property overrides
+            if node_data["propertyOverrides"]:
                 parsed_nodes.append(node_data)
     
     return parsed_nodes
@@ -312,18 +326,25 @@ def update_page_content(page_id, locale_id, api_key, translated_content):
     
     # Convert translated content into the correct format
     for node in translated_content:
+        node_id = node.get('id') or node.get('nodeId')
         node_data = {
-            "nodeId": node.get('id') or node.get('nodeId'),  # Try both possible keys
-            "propertyOverrides": []
+            "nodeId": node_id
         }
         
-        if "propertyOverrides" in node:
-            node_data["propertyOverrides"] = []
-            for override in node["propertyOverrides"]:
-                node_data["propertyOverrides"].append({
+        # Check if this is a component instance (has propertyOverrides)
+        if "propertyOverrides" in node and node["propertyOverrides"]:
+            # Only add propertyOverrides if there are actual overrides
+            node_data["propertyOverrides"] = [
+                {
                     "propertyId": override["propertyId"],
-                    "text": override["text"] if isinstance(override["text"], str) else override["text"].get('text', '')
-                })
+                    "text": override["text"] if isinstance(override["text"], str) 
+                           else override["text"].get('text', '')
+                }
+                for override in node["propertyOverrides"]
+            ]
+        else:
+            # For non-component instances, use text field directly
+            node_data["text"] = node.get("text", "")
         
         request_body["nodes"].append(node_data)
     
@@ -353,6 +374,14 @@ def update_page_content(page_id, locale_id, api_key, translated_content):
         except:
             print(response.text)
             
+        # Check for specific node errors in the response
+        if response.status_code == 200:
+            response_data = response.json()
+            if response_data.get("errors"):
+                print("\nWarning: Some nodes had errors:")
+                for error in response_data["errors"]:
+                    print(f"Node {error['nodeId']}: {error['error']}")
+        
         response.raise_for_status()
         return True, None
     except Exception as e:
@@ -362,6 +391,9 @@ def update_page_content(page_id, locale_id, api_key, translated_content):
 
 def main():
     st.title("Webflow Page Content Manager")
+    
+    # Add the image at the top
+    st.image("jameson.webp", caption="J. Jonah Jameson")
     
     # Print current session state
     print("\nCurrent Session State:")
